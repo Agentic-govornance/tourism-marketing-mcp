@@ -51,6 +51,16 @@ app.get('/data/v1/:filename', async c => {
   return new Response(object.body, { headers })
 })
 
+// ─── ダッシュボード ────────────────────────────────────
+app.get('/dashboard', async c => {
+  const secret = c.req.query('secret')
+  if (!secret || secret !== c.env.ADMIN_SECRET) {
+    return c.json({error: 'Unauthorized'}, 401)
+  }
+  const R2 = c.env.R2_BASE
+  return c.html(DASHBOARD_HTML.replace(/__R2_BASE__/g, R2))
+})
+
 // ─── ヘルスチェック ────────────────────────────────────
 app.get('/', c => c.json({
   name: 'CCDM MCP', version: '2.0.0',
@@ -387,5 +397,198 @@ async function handleTool(name: string, args: any, env: Env): Promise<unknown> {
     default: return {error:`Unknown tool: ${name}`}
   }
 }
+
+// ─── ダッシュボードHTML ───────────────────────────────
+const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CCDM Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-blocking.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f1117;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px}
+h1{font-size:22px;margin-bottom:8px;color:#fff}
+.subtitle{color:#888;font-size:13px;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.panel{background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;padding:20px;position:relative;min-height:320px}
+.panel.wide{grid-column:span 2}
+.panel h2{font-size:15px;color:#a0a8c0;margin-bottom:14px;font-weight:500}
+.spinner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:10px;color:#666;font-size:13px}
+.spinner::before{content:'';width:28px;height:28px;border:3px solid #333;border-top-color:#6c8aff;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hide{display:none}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:#6c8aff;padding:8px 12px;border-bottom:1px solid #2a2d3a;font-weight:500}
+td{padding:8px 12px;border-bottom:1px solid #1e2130}
+tr:hover td{background:#1e2130}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.stat-row{display:flex;gap:24px;margin-bottom:16px}
+.stat{background:#12141c;border-radius:8px;padding:14px 18px;flex:1}
+.stat .val{font-size:26px;font-weight:700;color:#fff}
+.stat .lbl{font-size:11px;color:#666;margin-top:2px}
+.err{color:#ff6b6b;font-size:13px}
+canvas{max-height:260px}
+</style></head><body>
+<h1>CCDM Data Lake Dashboard</h1>
+<div class="subtitle">Tourism Marketing MCP — Admin Overview</div>
+
+<div class="stat-row" id="stats">
+  <div class="stat"><div class="val" id="st-total">—</div><div class="lbl">Total Records</div></div>
+  <div class="stat"><div class="val" id="st-markets">—</div><div class="lbl">Markets</div></div>
+  <div class="stat"><div class="val" id="st-sources">—</div><div class="lbl">Sources</div></div>
+  <div class="stat"><div class="val" id="st-datasets">6</div><div class="lbl">Datasets</div></div>
+</div>
+
+<div class="grid">
+  <div class="panel" id="p1">
+    <h2>Corpus by Market</h2>
+    <div class="spinner" id="sp1">Loading corpus…</div>
+    <canvas id="c1"></canvas>
+  </div>
+  <div class="panel" id="p2">
+    <h2>Media Type Distribution</h2>
+    <div class="spinner" id="sp2">Loading media…</div>
+    <canvas id="c2"></canvas>
+  </div>
+  <div class="panel" id="p3">
+    <h2>Narrative × Market</h2>
+    <div class="spinner" id="sp3">Loading narratives…</div>
+    <canvas id="c3"></canvas>
+  </div>
+  <div class="panel" id="p4">
+    <h2>Data Freshness</h2>
+    <div class="spinner" id="sp4">Loading freshness…</div>
+    <div id="t4"></div>
+  </div>
+  <div class="panel wide" id="p5">
+    <h2>Agency Pricing &amp; Tours (FR Panel)</h2>
+    <div class="spinner" id="sp5">Loading panel…</div>
+    <canvas id="c5"></canvas>
+  </div>
+</div>
+
+<script type="module">
+const R2 = '__R2_BASE__';
+const CORPUS = R2 + '/corpus_index.parquet';
+const PANEL  = R2 + '/integrated_panel_v14.parquet';
+
+const COLORS = ['#6c8aff','#ff6c8a','#8aff6c','#ffc46c','#c46cff','#6cffc4','#ff8a6c'];
+
+function done(id){ document.getElementById('sp'+id).classList.add('hide') }
+function err(id,e){ const s=document.getElementById('sp'+id); s.textContent=e; s.classList.add('err') }
+function fmt(n){ return n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toString() }
+
+async function initDuckDB(){
+  const JSDELIVR_BUNDLES = {
+    mvp: { mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
+           mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js' },
+    eh:  { mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
+           mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js' }
+  };
+  const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+  const worker = new Worker(bundle.mainWorker);
+  const logger = new duckdb.ConsoleLogger();
+  const db = new duckdb.AsyncDuckDB(logger, worker);
+  await db.instantiate(bundle.mainModule);
+  return await db.connect();
+}
+
+async function query(conn, sql){
+  const result = await conn.query(sql);
+  const rows = result.toArray().map(r => {
+    const obj = {};
+    for (const field of result.schema.fields) {
+      const v = r[field.name];
+      obj[field.name] = typeof v === 'bigint' ? Number(v) : v;
+    }
+    return obj;
+  });
+  return rows;
+}
+
+(async()=>{
+  let conn;
+  try {
+    conn = await initDuckDB();
+  } catch(e) {
+    ['1','2','3','4','5'].forEach(i => err(i,'DuckDB init failed: '+e.message));
+    return;
+  }
+
+  // ① Corpus by Market
+  try {
+    const rows = await query(conn, \`SELECT market, COUNT(*)::INTEGER as n FROM '\${CORPUS}' GROUP BY market ORDER BY n DESC\`);
+    document.getElementById('st-total').textContent = fmt(rows.reduce((s,r)=>s+r.n,0));
+    document.getElementById('st-markets').textContent = rows.length;
+    new Chart(document.getElementById('c1'),{type:'bar',data:{
+      labels:rows.map(r=>r.market), datasets:[{data:rows.map(r=>r.n),backgroundColor:COLORS}]
+    },options:{indexAxis:'y',responsive:true,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}},y:{grid:{display:false}}}}});
+    done(1);
+  } catch(e){ err(1,e.message) }
+
+  // sources count
+  try {
+    const sr = await query(conn, \`SELECT COUNT(DISTINCT source_id)::INTEGER as n FROM '\${CORPUS}'\`);
+    document.getElementById('st-sources').textContent = sr[0].n;
+  } catch(e){}
+
+  // ② Media Type
+  try {
+    const rows = await query(conn, \`SELECT medium_type, COUNT(*)::INTEGER as n FROM '\${CORPUS}' GROUP BY medium_type ORDER BY n DESC\`);
+    new Chart(document.getElementById('c2'),{type:'bar',data:{
+      labels:rows.map(r=>r.medium_type), datasets:[{data:rows.map(r=>r.n),backgroundColor:COLORS}]
+    },options:{indexAxis:'y',responsive:true,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}},y:{grid:{display:false}}}}});
+    done(2);
+  } catch(e){ err(2,e.message) }
+
+  // ③ Narrative × Market
+  try {
+    const rows = await query(conn, \`SELECT market, narrative, COUNT(*)::INTEGER as n FROM '\${CORPUS}' WHERE narrative != 'uncategorized' GROUP BY market, narrative ORDER BY market, n DESC\`);
+    const markets = [...new Set(rows.map(r=>r.market))];
+    const narratives = [...new Set(rows.map(r=>r.narrative))];
+    const datasets = narratives.map((nar,i) => ({
+      label: nar,
+      data: markets.map(m => { const r = rows.find(x=>x.market===m&&x.narrative===nar); return r?r.n:0 }),
+      backgroundColor: COLORS[i % COLORS.length],
+    }));
+    new Chart(document.getElementById('c3'),{type:'bar',data:{labels:markets,datasets},
+      options:{responsive:true,plugins:{legend:{position:'bottom',labels:{color:'#888',boxWidth:12,font:{size:11}}}},
+        scales:{x:{stacked:true,grid:{display:false}},y:{stacked:true,ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}}}}});
+    done(3);
+  } catch(e){ err(3,e.message) }
+
+  // ④ Data Freshness
+  try {
+    const rows = await query(conn, \`SELECT market, MAX(year)::INTEGER as latest_year, MIN(year)::INTEGER as earliest_year, COUNT(*)::INTEGER as n FROM '\${CORPUS}' WHERE year IS NOT NULL GROUP BY market ORDER BY n DESC\`);
+    let html = '<table><tr><th>Market</th><th>Earliest</th><th>Latest</th><th class="num">Records</th></tr>';
+    rows.forEach(r => { html += '<tr><td>'+r.market+'</td><td>'+r.earliest_year+'</td><td>'+r.latest_year+'</td><td class="num">'+fmt(r.n)+'</td></tr>' });
+    html += '</table>';
+    document.getElementById('t4').innerHTML = html;
+    done(4);
+  } catch(e){ err(4,e.message) }
+
+  // ⑤ Agency Pricing & Tours
+  try {
+    const rows = await query(conn, \`SELECT quarter, agency_japan_price_median_q as price, agency_japan_tours_q as tours FROM '\${PANEL}' WHERE agency_japan_price_median_q IS NOT NULL ORDER BY quarter\`);
+    new Chart(document.getElementById('c5'),{type:'line',data:{
+      labels:rows.map(r=>r.quarter),
+      datasets:[
+        {label:'Median Price (€)',data:rows.map(r=>r.price),borderColor:'#6c8aff',backgroundColor:'rgba(108,138,255,0.1)',fill:true,tension:0.3,yAxisID:'y'},
+        {label:'Tours Count',data:rows.map(r=>r.tours),borderColor:'#ff6c8a',backgroundColor:'rgba(255,108,138,0.1)',fill:true,tension:0.3,yAxisID:'y1'}
+      ]
+    },options:{responsive:true,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{position:'bottom',labels:{color:'#888',boxWidth:12,font:{size:11}}}},
+      scales:{
+        x:{ticks:{maxRotation:45,autoSkip:true,maxTicksLimit:20,color:'#666'},grid:{display:false}},
+        y:{position:'left',title:{display:true,text:'Price (€)',color:'#6c8aff'},ticks:{color:'#6c8aff'},grid:{color:'#1e2130'}},
+        y1:{position:'right',title:{display:true,text:'Tours',color:'#ff6c8a'},ticks:{color:'#ff6c8a'},grid:{display:false}}
+      }}});
+    done(5);
+  } catch(e){ err(5,e.message) }
+
+})();
+<\/script></body></html>`;
 
 export default app
