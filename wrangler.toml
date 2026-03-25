@@ -12,4 +12,4 @@ binding = "CCDM_R2"
 bucket_name = "ccdm-datalake"
 
 [vars]
-R2_BASE = "https://ccdm-mcp.teddykmk.workers.dev/data/v1"
+R2_BASE = "https://ccdm.patent-space.dev/data/v1"

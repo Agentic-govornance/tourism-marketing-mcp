@@ -24,7 +24,7 @@ async function auth(req: Request, env: Env): Promise<{ok:boolean; err?:string}> 
   const key = req.headers.get('X-API-Key')
     || req.headers.get('Authorization')?.replace('Bearer ','')
     || new URL(req.url).searchParams.get('api_key')
-  if (!key) return {ok:false, err:'API key required. Apply: https://ccdm-mcp.patent-space.dev/apply'}
+  if (!key) return {ok:false, err:'API key required. Apply: https://ccdm.patent-space.dev/apply'}
 
   const d = await env.CCDM_KV.get<any>(`key:${key}`, 'json')
   if (!d)                                  return {ok:false, err:'Invalid API key'}
@@ -55,7 +55,7 @@ app.get('/data/v1/:filename', async c => {
 app.get('/', c => c.json({
   name: 'CCDM MCP', version: '2.0.0',
   description: '日本の観光政策高度化のためのCCDMデータAPI',
-  apply: 'https://ccdm-mcp.patent-space.dev/apply',
+  apply: 'https://ccdm.patent-space.dev/apply',
 }))
 
 // ─── 申請フォーム（HTML）─────────────────────────────
@@ -199,7 +199,7 @@ const TOOLS = [
       properties: {
         dataset: {
           type: 'string',
-          enum: ['corpus_index','integrated_panel_v14','setouchi_market_panel','granger_v13','dmo_database'],
+          enum: ['corpus_index','integrated_panel_v14','setouchi_market_panel','market_signals_4market','granger_v13','dmo_database'],
           description: 'データセット名',
         },
       },
@@ -223,7 +223,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        dataset: {type:'string', enum:['corpus_index','integrated_panel_v14','setouchi_market_panel','granger_v13','dmo_database']},
+        dataset: {type:'string', enum:['corpus_index','integrated_panel_v14','setouchi_market_panel','market_signals_4market','granger_v13','dmo_database']},
       },
       required: ['dataset'],
     },
@@ -276,6 +276,16 @@ const SCHEMAS: Record<string,any> = {
       gt_naoshima: 'Google Trends 直島',
     },
   },
+  market_signals_4market: {
+    description: 'FR/TW/AU/US 4市場CCDMシグナル比較パネル。44四半期（2015Q1-2025Q4）×20変数。',
+    columns: {
+      quarter: '四半期（例: 2015Q1）',
+      fr_n: 'FR記事数', fr_template: 'FRテンプレートスコア', fr_depth: 'FR深度スコア', fr_entropy: 'FRエントロピー',
+      tw_n: 'TW記事数', tw_template: 'TWテンプレートスコア', tw_depth: 'TW深度スコア', tw_entropy: 'TWエントロピー', tw_japan_pct: 'TW日本比率',
+      us_n: 'US記事数', us_template: 'USテンプレートスコア', us_depth: 'US深度スコア', us_entropy: 'USエントロピー', us_japan_pct: 'US日本比率',
+      au_n: 'AU記事数', au_template: 'AUテンプレートスコア', au_depth: 'AU深度スコア', au_entropy: 'AUエントロピー', au_japan_pct: 'AU日本比率',
+    },
+  },
   granger_v13: {
     description: 'Granger因果分析結果。1119ペア。',
     columns: {
@@ -297,6 +307,7 @@ async function handleTool(name: string, args: any, env: Env): Promise<unknown> {
           { id:'corpus_index',          url:`${base}/corpus_index.parquet`,          rows:'~6.39M', description:'CCDMコーパスインデックス（body/title除去済み）' },
           { id:'integrated_panel_v14',  url:`${base}/integrated_panel_v14.parquet`,  rows:121,      description:'FR市場×瀬戸内 統合時系列パネル' },
           { id:'setouchi_market_panel', url:`${base}/setouchi_market_panel.parquet`, rows:88,       description:'瀬戸内×4市場 市場パネル' },
+          { id:'market_signals_4market', url:`${base}/market_signals_4market.parquet`, rows:44,       description:'FR/TW/AU/US 4市場CCDMシグナル比較パネル' },
           { id:'granger_v13',           url:`${base}/granger_v13.parquet`,           rows:1119,     description:'Granger因果分析結果' },
           { id:'dmo_database',          url:`${base}/dmo_database.parquet`,          rows:1869,     description:'世界DMOデータベース' },
         ],
@@ -309,6 +320,7 @@ async function handleTool(name: string, args: any, env: Env): Promise<unknown> {
         corpus_index:          'corpus_index.parquet',
         integrated_panel_v14:  'integrated_panel_v14.parquet',
         setouchi_market_panel: 'setouchi_market_panel.parquet',
+        market_signals_4market: 'market_signals_4market.parquet',
         granger_v13:           'granger_v13.parquet',
         dmo_database:          'dmo_database.parquet',
       }
