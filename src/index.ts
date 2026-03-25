@@ -58,7 +58,11 @@ app.get('/dashboard', async c => {
     return c.json({error: 'Unauthorized'}, 401)
   }
   const R2 = c.env.R2_BASE
-  return c.html(DASHBOARD_HTML.replace(/__R2_BASE__/g, R2))
+  const market = c.req.query('market')
+  if (market) {
+    return c.html(DASHBOARD_MARKET_HTML.replace(/__R2_BASE__/g, R2).replace(/__MARKET__/g, market).replace(/__SECRET__/g, secret))
+  }
+  return c.html(DASHBOARD_HTML.replace(/__R2_BASE__/g, R2).replace(/__SECRET__/g, secret))
 })
 
 // ─── ヘルスチェック ────────────────────────────────────
@@ -402,8 +406,7 @@ async function handleTool(name: string, args: any, env: Env): Promise<unknown> {
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CCDM Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<script src="https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-blocking.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"><\/script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0f1117;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px}
@@ -468,42 +471,41 @@ canvas{max-height:260px}
 </div>
 
 <script type="module">
+import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
+
 const R2 = '__R2_BASE__';
+const SECRET = '__SECRET__';
 const CORPUS = R2 + '/corpus_index.parquet';
 const PANEL  = R2 + '/integrated_panel_v14.parquet';
 
 const COLORS = ['#6c8aff','#ff6c8a','#8aff6c','#ffc46c','#c46cff','#6cffc4','#ff8a6c'];
 
 function done(id){ document.getElementById('sp'+id).classList.add('hide') }
-function err(id,e){ const s=document.getElementById('sp'+id); s.textContent=e; s.classList.add('err') }
+function showErr(id,e){ const s=document.getElementById('sp'+id); s.textContent=String(e); s.classList.add('err'); s.style.animation='none' }
 function fmt(n){ return n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toString() }
 
 async function initDuckDB(){
-  const JSDELIVR_BUNDLES = {
-    mvp: { mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-mvp.wasm',
-           mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-mvp.worker.js' },
-    eh:  { mainModule: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-eh.wasm',
-           mainWorker: 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist/duckdb-browser-eh.worker.js' }
-  };
-  const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
-  const worker = new Worker(bundle.mainWorker);
+  const BUNDLES = duckdb.getJsDelivrBundles();
+  const bundle = await duckdb.selectBundle(BUNDLES);
+  const worker = await duckdb.createWorker(bundle.mainWorker);
   const logger = new duckdb.ConsoleLogger();
   const db = new duckdb.AsyncDuckDB(logger, worker);
-  await db.instantiate(bundle.mainModule);
-  return await db.connect();
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  const conn = await db.connect();
+  await conn.query("INSTALL httpfs; LOAD httpfs;");
+  return conn;
 }
 
-async function query(conn, sql){
+async function q(conn, sql){
   const result = await conn.query(sql);
-  const rows = result.toArray().map(r => {
+  return result.toArray().map(row => {
     const obj = {};
     for (const field of result.schema.fields) {
-      const v = r[field.name];
-      obj[field.name] = typeof v === 'bigint' ? Number(v) : v;
+      const v = row[field.name];
+      obj[field.name] = (typeof v === 'bigint') ? Number(v) : (v === null || v === undefined) ? null : v;
     }
     return obj;
   });
-  return rows;
 }
 
 (async()=>{
@@ -511,41 +513,43 @@ async function query(conn, sql){
   try {
     conn = await initDuckDB();
   } catch(e) {
-    ['1','2','3','4','5'].forEach(i => err(i,'DuckDB init failed: '+e.message));
+    ['1','2','3','4','5'].forEach(i => showErr(i,'DuckDB init failed: '+e));
     return;
   }
 
   // ① Corpus by Market
   try {
-    const rows = await query(conn, \`SELECT market, COUNT(*)::INTEGER as n FROM '\${CORPUS}' GROUP BY market ORDER BY n DESC\`);
+    const rows = await q(conn, "SELECT market, COUNT(*)::INTEGER as n FROM '" + CORPUS + "' GROUP BY market ORDER BY n DESC");
     document.getElementById('st-total').textContent = fmt(rows.reduce((s,r)=>s+r.n,0));
     document.getElementById('st-markets').textContent = rows.length;
-    new Chart(document.getElementById('c1'),{type:'bar',data:{
+    const c1chart = new Chart(document.getElementById('c1'),{type:'bar',data:{
       labels:rows.map(r=>r.market), datasets:[{data:rows.map(r=>r.n),backgroundColor:COLORS}]
-    },options:{indexAxis:'y',responsive:true,plugins:{legend:{display:false}},
-      scales:{x:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}},y:{grid:{display:false}}}}});
+    },options:{indexAxis:'y',responsive:true,plugins:{legend:{display:false}},onClick:(evt,elements)=>{
+        if(elements.length>0){const idx=elements[0].index;const m=rows[idx].market;window.location.href='/dashboard?secret='+SECRET+'&market='+m}
+      },scales:{x:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}},y:{grid:{display:false},ticks:{font:{weight:'bold'}}}}}});
+    document.getElementById('c1').style.cursor='pointer';
     done(1);
-  } catch(e){ err(1,e.message) }
+  } catch(e){ showErr(1,e) }
 
   // sources count
   try {
-    const sr = await query(conn, \`SELECT COUNT(DISTINCT source_id)::INTEGER as n FROM '\${CORPUS}'\`);
+    const sr = await q(conn, "SELECT COUNT(DISTINCT source_id)::INTEGER as n FROM '" + CORPUS + "'");
     document.getElementById('st-sources').textContent = sr[0].n;
   } catch(e){}
 
   // ② Media Type
   try {
-    const rows = await query(conn, \`SELECT medium_type, COUNT(*)::INTEGER as n FROM '\${CORPUS}' GROUP BY medium_type ORDER BY n DESC\`);
+    const rows = await q(conn, "SELECT medium_type, COUNT(*)::INTEGER as n FROM '" + CORPUS + "' GROUP BY medium_type ORDER BY n DESC");
     new Chart(document.getElementById('c2'),{type:'bar',data:{
       labels:rows.map(r=>r.medium_type), datasets:[{data:rows.map(r=>r.n),backgroundColor:COLORS}]
     },options:{indexAxis:'y',responsive:true,plugins:{legend:{display:false}},
       scales:{x:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}},y:{grid:{display:false}}}}});
     done(2);
-  } catch(e){ err(2,e.message) }
+  } catch(e){ showErr(2,e) }
 
   // ③ Narrative × Market
   try {
-    const rows = await query(conn, \`SELECT market, narrative, COUNT(*)::INTEGER as n FROM '\${CORPUS}' WHERE narrative != 'uncategorized' GROUP BY market, narrative ORDER BY market, n DESC\`);
+    const rows = await q(conn, "SELECT market, narrative, COUNT(*)::INTEGER as n FROM '" + CORPUS + "' WHERE narrative != 'uncategorized' GROUP BY market, narrative ORDER BY market, n DESC");
     const markets = [...new Set(rows.map(r=>r.market))];
     const narratives = [...new Set(rows.map(r=>r.narrative))];
     const datasets = narratives.map((nar,i) => ({
@@ -557,36 +561,247 @@ async function query(conn, sql){
       options:{responsive:true,plugins:{legend:{position:'bottom',labels:{color:'#888',boxWidth:12,font:{size:11}}}},
         scales:{x:{stacked:true,grid:{display:false}},y:{stacked:true,ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}}}}});
     done(3);
-  } catch(e){ err(3,e.message) }
+  } catch(e){ showErr(3,e) }
 
   // ④ Data Freshness
   try {
-    const rows = await query(conn, \`SELECT market, MAX(year)::INTEGER as latest_year, MIN(year)::INTEGER as earliest_year, COUNT(*)::INTEGER as n FROM '\${CORPUS}' WHERE year IS NOT NULL GROUP BY market ORDER BY n DESC\`);
-    let html = '<table><tr><th>Market</th><th>Earliest</th><th>Latest</th><th class="num">Records</th></tr>';
-    rows.forEach(r => { html += '<tr><td>'+r.market+'</td><td>'+r.earliest_year+'</td><td>'+r.latest_year+'</td><td class="num">'+fmt(r.n)+'</td></tr>' });
+    const rows = await q(conn, "SELECT market, MAX(year)::INTEGER as latest_year, MIN(year)::INTEGER as earliest_year, COUNT(*)::INTEGER as n FROM '" + CORPUS + "' WHERE year IS NOT NULL GROUP BY market ORDER BY n DESC");
+    let html = '<table><tr><th>Market</th><th>Earliest</th><th>Latest</th><th class=\"num\">Records</th></tr>';
+    rows.forEach(r => { html += '<tr><td>'+r.market+'</td><td>'+r.earliest_year+'</td><td>'+r.latest_year+'</td><td class=\"num\">'+fmt(r.n)+'</td></tr>' });
     html += '</table>';
     document.getElementById('t4').innerHTML = html;
     done(4);
-  } catch(e){ err(4,e.message) }
+  } catch(e){ showErr(4,e) }
 
   // ⑤ Agency Pricing & Tours
   try {
-    const rows = await query(conn, \`SELECT quarter, agency_japan_price_median_q as price, agency_japan_tours_q as tours FROM '\${PANEL}' WHERE agency_japan_price_median_q IS NOT NULL ORDER BY quarter\`);
+    const rows = await q(conn, "SELECT quarter, agency_japan_price_median_q as price, agency_japan_tours_q as tours FROM '" + PANEL + "' WHERE agency_japan_price_median_q IS NOT NULL ORDER BY quarter");
     new Chart(document.getElementById('c5'),{type:'line',data:{
       labels:rows.map(r=>r.quarter),
       datasets:[
-        {label:'Median Price (€)',data:rows.map(r=>r.price),borderColor:'#6c8aff',backgroundColor:'rgba(108,138,255,0.1)',fill:true,tension:0.3,yAxisID:'y'},
+        {label:'Median Price (EUR)',data:rows.map(r=>r.price),borderColor:'#6c8aff',backgroundColor:'rgba(108,138,255,0.1)',fill:true,tension:0.3,yAxisID:'y'},
         {label:'Tours Count',data:rows.map(r=>r.tours),borderColor:'#ff6c8a',backgroundColor:'rgba(255,108,138,0.1)',fill:true,tension:0.3,yAxisID:'y1'}
       ]
     },options:{responsive:true,interaction:{mode:'index',intersect:false},
       plugins:{legend:{position:'bottom',labels:{color:'#888',boxWidth:12,font:{size:11}}}},
       scales:{
         x:{ticks:{maxRotation:45,autoSkip:true,maxTicksLimit:20,color:'#666'},grid:{display:false}},
-        y:{position:'left',title:{display:true,text:'Price (€)',color:'#6c8aff'},ticks:{color:'#6c8aff'},grid:{color:'#1e2130'}},
+        y:{position:'left',title:{display:true,text:'Price (EUR)',color:'#6c8aff'},ticks:{color:'#6c8aff'},grid:{color:'#1e2130'}},
         y1:{position:'right',title:{display:true,text:'Tours',color:'#ff6c8a'},ticks:{color:'#ff6c8a'},grid:{display:false}}
       }}});
     done(5);
-  } catch(e){ err(5,e.message) }
+  } catch(e){ showErr(5,e) }
+
+})();
+<\/script></body></html>`;
+
+// ─── 市場別詳細ページHTML ─────────────────────────────
+const DASHBOARD_MARKET_HTML = `<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__MARKET__ — CCDM Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"><\/script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f1117;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px}
+h1{font-size:22px;margin-bottom:4px;color:#fff}
+.back{color:#6c8aff;text-decoration:none;font-size:13px;display:inline-block;margin-bottom:20px}
+.back:hover{text-decoration:underline}
+.subtitle{color:#888;font-size:13px;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.panel{background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;padding:20px;position:relative;min-height:300px}
+.panel.wide{grid-column:span 2}
+.panel h2{font-size:15px;color:#a0a8c0;margin-bottom:14px;font-weight:500}
+.spinner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:10px;color:#666;font-size:13px}
+.spinner::before{content:'';width:28px;height:28px;border:3px solid #333;border-top-color:#6c8aff;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hide{display:none}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:#6c8aff;padding:8px 10px;border-bottom:1px solid #2a2d3a;font-weight:500}
+td{padding:7px 10px;border-bottom:1px solid #1e2130}
+tr:hover td{background:#1e2130}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.stat-row{display:flex;gap:20px;margin-bottom:16px}
+.stat{background:#12141c;border-radius:8px;padding:14px 18px;flex:1}
+.stat .val{font-size:26px;font-weight:700;color:#fff}
+.stat .lbl{font-size:11px;color:#666;margin-top:2px}
+.err{color:#ff6b6b;font-size:13px}
+canvas{max-height:280px}
+.bar-sm{height:6px;background:#2a2d3a;border-radius:3px;margin-top:4px}
+.bar-fill{height:100%;background:#6c8aff;border-radius:3px}
+</style></head><body>
+
+<a class="back" href="/dashboard?secret=__SECRET__">&larr; Overview</a>
+<h1>__MARKET__ Market Detail</h1>
+<div class="subtitle">CCDM Data Lake — Market-level analytics</div>
+
+<div class="stat-row">
+  <div class="stat"><div class="val" id="st-total">—</div><div class="lbl">Total Records</div></div>
+  <div class="stat"><div class="val" id="st-sources">—</div><div class="lbl">Sources</div></div>
+  <div class="stat"><div class="val" id="st-dated">—</div><div class="lbl">With Date</div></div>
+  <div class="stat"><div class="val" id="st-years">—</div><div class="lbl">Year Range</div></div>
+</div>
+
+<div class="grid">
+  <div class="panel" id="p1">
+    <h2>Media Type — Count</h2>
+    <div class="spinner" id="sp1">Loading…</div>
+    <canvas id="c1"></canvas>
+  </div>
+  <div class="panel" id="p2">
+    <h2>Media Type — Time Series</h2>
+    <div class="spinner" id="sp2">Loading…</div>
+    <canvas id="c2"></canvas>
+  </div>
+  <div class="panel" id="p3">
+    <h2>Narrative Distribution</h2>
+    <div class="spinner" id="sp3">Loading…</div>
+    <canvas id="c3"></canvas>
+  </div>
+  <div class="panel" id="p4">
+    <h2>Narrative — Time Series</h2>
+    <div class="spinner" id="sp4">Loading…</div>
+    <canvas id="c4"></canvas>
+  </div>
+  <div class="panel" id="p5">
+    <h2>Top Sources</h2>
+    <div class="spinner" id="sp5">Loading…</div>
+    <div id="t5"></div>
+  </div>
+  <div class="panel" id="p6">
+    <h2>Yearly Volume</h2>
+    <div class="spinner" id="sp6">Loading…</div>
+    <canvas id="c6"></canvas>
+  </div>
+</div>
+
+<script type="module">
+import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
+
+const R2 = '__R2_BASE__';
+const MKT = '__MARKET__';
+const CORPUS = R2 + '/corpus_index.parquet';
+const COLORS = ['#6c8aff','#ff6c8a','#8aff6c','#ffc46c','#c46cff','#6cffc4','#ff8a6c','#ff9f43','#a29bfe','#fd79a8'];
+const LINE_COLORS = ['#6c8aff','#ff6c8a','#8aff6c','#ffc46c','#c46cff','#6cffc4','#ff8a6c'];
+
+function done(id){ document.getElementById('sp'+id).classList.add('hide') }
+function showErr(id,e){ const s=document.getElementById('sp'+id); s.textContent=String(e); s.classList.add('err'); s.style.animation='none' }
+function fmt(n){ return n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toString() }
+
+async function initDuckDB(){
+  const BUNDLES = duckdb.getJsDelivrBundles();
+  const bundle = await duckdb.selectBundle(BUNDLES);
+  const worker = await duckdb.createWorker(bundle.mainWorker);
+  const logger = new duckdb.ConsoleLogger();
+  const db = new duckdb.AsyncDuckDB(logger, worker);
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  const conn = await db.connect();
+  await conn.query("INSTALL httpfs; LOAD httpfs;");
+  return conn;
+}
+
+async function q(conn, sql){
+  const result = await conn.query(sql);
+  return result.toArray().map(row => {
+    const obj = {};
+    for (const field of result.schema.fields) {
+      const v = row[field.name];
+      obj[field.name] = (typeof v === 'bigint') ? Number(v) : (v === null || v === undefined) ? null : v;
+    }
+    return obj;
+  });
+}
+
+(async()=>{
+  let conn;
+  try { conn = await initDuckDB() } catch(e) {
+    ['1','2','3','4','5','6'].forEach(i => showErr(i,'DuckDB init failed: '+e));
+    return;
+  }
+  const W = " WHERE market='" + MKT + "'";
+  const WY = " WHERE market='" + MKT + "' AND year IS NOT NULL AND year >= 2010 AND year <= 2026";
+
+  // Stats
+  try {
+    const r = await q(conn, "SELECT COUNT(*)::INTEGER as total, COUNT(DISTINCT source_id)::INTEGER as sources FROM '" + CORPUS + "'" + W);
+    document.getElementById('st-total').textContent = fmt(r[0].total);
+    document.getElementById('st-sources').textContent = r[0].sources;
+    const r2 = await q(conn, "SELECT COUNT(*)::INTEGER as n, MIN(year)::INTEGER as mn, MAX(year)::INTEGER as mx FROM '" + CORPUS + "'" + WY);
+    document.getElementById('st-dated').textContent = fmt(r2[0].n);
+    document.getElementById('st-years').textContent = r2[0].mn + '–' + r2[0].mx;
+  } catch(e){}
+
+  // ① Media Type Count
+  try {
+    const rows = await q(conn, "SELECT medium_type, COUNT(*)::INTEGER as n FROM '" + CORPUS + "'" + W + " GROUP BY medium_type ORDER BY n DESC");
+    new Chart(document.getElementById('c1'),{type:'doughnut',data:{
+      labels:rows.map(r=>r.medium_type+' ('+fmt(r.n)+')'), datasets:[{data:rows.map(r=>r.n),backgroundColor:COLORS}]
+    },options:{responsive:true,plugins:{legend:{position:'right',labels:{color:'#ccc',font:{size:11},padding:8}}}}});
+    done(1);
+  } catch(e){ showErr(1,e) }
+
+  // ② Media Type Time Series
+  try {
+    const rows = await q(conn, "SELECT year::INTEGER as yr, medium_type, COUNT(*)::INTEGER as n FROM '" + CORPUS + "'" + WY + " GROUP BY yr, medium_type ORDER BY yr");
+    const types = [...new Set(rows.map(r=>r.medium_type))];
+    const years = [...new Set(rows.map(r=>r.yr))].sort();
+    const datasets = types.map((t,i) => ({
+      label:t, data:years.map(y=>{const r=rows.find(x=>x.yr===y&&x.medium_type===t);return r?r.n:0}),
+      borderColor:LINE_COLORS[i%LINE_COLORS.length], backgroundColor:'transparent', tension:0.3, pointRadius:2
+    }));
+    new Chart(document.getElementById('c2'),{type:'line',data:{labels:years,datasets},
+      options:{responsive:true,plugins:{legend:{position:'bottom',labels:{color:'#888',boxWidth:12,font:{size:11}}}},
+        scales:{x:{grid:{display:false}},y:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}}}}});
+    done(2);
+  } catch(e){ showErr(2,e) }
+
+  // ③ Narrative Count
+  try {
+    const rows = await q(conn, "SELECT narrative, COUNT(*)::INTEGER as n FROM '" + CORPUS + "'" + W + " GROUP BY narrative ORDER BY n DESC");
+    new Chart(document.getElementById('c3'),{type:'bar',data:{
+      labels:rows.map(r=>r.narrative), datasets:[{data:rows.map(r=>r.n),backgroundColor:COLORS}]
+    },options:{indexAxis:'y',responsive:true,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}},y:{grid:{display:false}}}}});
+    done(3);
+  } catch(e){ showErr(3,e) }
+
+  // ④ Narrative Time Series
+  try {
+    const rows = await q(conn, "SELECT year::INTEGER as yr, narrative, COUNT(*)::INTEGER as n FROM '" + CORPUS + "'" + WY + " AND narrative != 'uncategorized' GROUP BY yr, narrative ORDER BY yr");
+    const nars = [...new Set(rows.map(r=>r.narrative))];
+    const years = [...new Set(rows.map(r=>r.yr))].sort();
+    const datasets = nars.map((nar,i) => ({
+      label:nar, data:years.map(y=>{const r=rows.find(x=>x.yr===y&&x.narrative===nar);return r?r.n:0}),
+      borderColor:LINE_COLORS[i%LINE_COLORS.length], backgroundColor:'transparent', tension:0.3, pointRadius:2
+    }));
+    new Chart(document.getElementById('c4'),{type:'line',data:{labels:years,datasets},
+      options:{responsive:true,plugins:{legend:{position:'bottom',labels:{color:'#888',boxWidth:12,font:{size:11}}}},
+        scales:{x:{grid:{display:false}},y:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}}}}});
+    done(4);
+  } catch(e){ showErr(4,e) }
+
+  // ⑤ Top Sources
+  try {
+    const rows = await q(conn, "SELECT source_id, COUNT(*)::INTEGER as n FROM '" + CORPUS + "'" + W + " GROUP BY source_id ORDER BY n DESC LIMIT 20");
+    const mx = rows[0]?.n || 1;
+    let html = '<table><tr><th>Source</th><th class=\"num\">Count</th><th style=\"width:40%\"></th></tr>';
+    rows.forEach(r => {
+      const pct = (r.n/mx*100).toFixed(0);
+      html += '<tr><td>'+r.source_id+'</td><td class=\"num\">'+fmt(r.n)+'</td><td><div class=\"bar-sm\"><div class=\"bar-fill\" style=\"width:'+pct+'%\"></div></div></td></tr>';
+    });
+    html += '</table>';
+    document.getElementById('t5').innerHTML = html;
+    done(5);
+  } catch(e){ showErr(5,e) }
+
+  // ⑥ Yearly Volume
+  try {
+    const rows = await q(conn, "SELECT year::INTEGER as yr, COUNT(*)::INTEGER as n FROM '" + CORPUS + "'" + WY + " GROUP BY yr ORDER BY yr");
+    new Chart(document.getElementById('c6'),{type:'bar',data:{
+      labels:rows.map(r=>r.yr), datasets:[{data:rows.map(r=>r.n),backgroundColor:'#6c8aff',borderRadius:3}]
+    },options:{responsive:true,plugins:{legend:{display:false}},
+      scales:{x:{grid:{display:false}},y:{ticks:{callback:v=>fmt(v)},grid:{color:'#1e2130'}}}}});
+    done(6);
+  } catch(e){ showErr(6,e) }
 
 })();
 <\/script></body></html>`;
