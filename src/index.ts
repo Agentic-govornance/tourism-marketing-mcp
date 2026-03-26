@@ -213,7 +213,7 @@ const TOOLS = [
       properties: {
         dataset: {
           type: 'string',
-          enum: ['corpus_index','integrated_panel_v14','setouchi_market_panel','market_signals_4market','granger_v13','dmo_database'],
+          enum: ['corpus_index','integrated_panel_v14','setouchi_market_panel','market_signals_4market','granger_v13','dmo_database','tariff_master'],
           description: 'データセット名',
         },
       },
@@ -237,7 +237,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        dataset: {type:'string', enum:['corpus_index','integrated_panel_v14','setouchi_market_panel','market_signals_4market','granger_v13','dmo_database']},
+        dataset: {type:'string', enum:['corpus_index','integrated_panel_v14','setouchi_market_panel','market_signals_4market','granger_v13','dmo_database','tariff_master']},
       },
       required: ['dataset'],
     },
@@ -300,6 +300,23 @@ const SCHEMAS: Record<string,any> = {
       au_n: 'AU記事数', au_template: 'AUテンプレートスコア', au_depth: 'AU深度スコア', au_entropy: 'AUエントロピー', au_japan_pct: 'AU日本比率',
     },
   },
+  tariff_master: {
+    description: '4市場統合タリフマスター。63,085件。旅行会社の日本ツアー商品（価格・日程・目的地）。',
+    columns: {
+      market: '市場: FR/AU/US/IT',
+      quarter: '四半期（例: 2020Q1）',
+      source_id: 'データソース識別子',
+      agency_id: '旅行会社識別子',
+      price_min: '最低価格（各市場通貨）',
+      price_max: '最高価格',
+      price_median: '中央値価格',
+      currency: '通貨: EUR/AUD/USD',
+      duration_days: 'ツアー日数',
+      destinations: '目的地（カンマ区切り）',
+      is_luxury: 'ラグジュアリーフラグ',
+      raw_source: '元ファイルパス',
+    },
+  },
   granger_v13: {
     description: 'Granger因果分析結果。1119ペア。',
     columns: {
@@ -324,6 +341,7 @@ async function handleTool(name: string, args: any, env: Env): Promise<unknown> {
           { id:'market_signals_4market', url:`${base}/market_signals_4market.parquet`, rows:44,       description:'FR/TW/AU/US 4市場CCDMシグナル比較パネル' },
           { id:'granger_v13',           url:`${base}/granger_v13.parquet`,           rows:1119,     description:'Granger因果分析結果' },
           { id:'dmo_database',          url:`${base}/dmo_database.parquet`,          rows:1869,     description:'世界DMOデータベース' },
+          { id:'tariff_master',        url:`${base}/tariff_master.parquet`,        rows:63085,    description:'4市場統合タリフマスター（FR/AU/US/IT）' },
         ],
         usage: 'get_dataset_urlでURLを取得 → DuckDBで直接クエリ',
         example: `duckdb -c "SELECT * FROM read_parquet('${base}/corpus_index.parquet') LIMIT 5"`,
@@ -337,6 +355,7 @@ async function handleTool(name: string, args: any, env: Env): Promise<unknown> {
         market_signals_4market: 'market_signals_4market.parquet',
         granger_v13:           'granger_v13.parquet',
         dmo_database:          'dmo_database.parquet',
+        tariff_master:         'tariff_master.parquet',
       }
       const file = map[args.dataset]
       if (!file) return {error:`Unknown dataset: ${args.dataset}`}

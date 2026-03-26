@@ -1,21 +1,5 @@
 {
-  "name": "ccdm-mcp-workers",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "@cloudflare/workers-types": "^4.20260317.1",
-    "hono": "^4.12.8"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "wrangler": "^4.76.0"
+    "hono": "^4.12.9"
   }
 }
